@@ -157,4 +157,4 @@ See [P0 software evidence](docs/P0_SOFTWARE_EVIDENCE.md) and [current stage](doc
 ## Links
 
 - Engineering portfolio: https://github.com/Aceishere66/engineering-portfolio
-- EDITH Dev Studio engineering page: https://edithdevstudio.com/engineering
+- EDITH Dev Studio engineering page: https://edithdevstudio.com/engineering/
