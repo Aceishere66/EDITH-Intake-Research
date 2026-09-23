@@ -7,7 +7,9 @@ from edith_intake.domain import ImuSample, SensorSample, TimingQualityReport
 
 
 class TimingQualityAuditor:
-    """Audit sensor-stream timing without silently hiding defects."""
+    """Rigorous timing quality auditor for inertial sensor streams.
+    Never silently resamples or interpolates away timing defects.
+    """
 
     def __init__(
         self,
@@ -24,6 +26,7 @@ class TimingQualityAuditor:
         samples: Sequence[ImuSample | SensorSample],
         nominal_sample_rate_hz: float = 50.0,
     ) -> TimingQualityReport:
+        """Audit timestamps across a sequence of samples."""
         if not samples:
             return TimingQualityReport(
                 sample_count=0,
@@ -41,26 +44,39 @@ class TimingQualityAuditor:
                 unacceptable_reasons=("empty_stream",),
             )
 
-        timestamps_ns = [sample.timestamp_ns for sample in samples]
-        duration_s = max(
-            0.0,
-            (timestamps_ns[-1] - timestamps_ns[0]) / 1_000_000_000.0,
-        )
+        sample_count = len(samples)
+        if sample_count == 1:
+            return TimingQualityReport(
+                sample_count=1,
+                duration_s=0.0,
+                nominal_sample_rate_hz=nominal_sample_rate_hz,
+                measured_mean_sample_rate_hz=0.0,
+                median_interval_ms=0.0,
+                p95_interval_ms=0.0,
+                max_interval_ms=0.0,
+                jitter_std_ms=0.0,
+                gap_count=0,
+                dropped_sample_estimate=0,
+                non_monotonic_timestamp_count=0,
+                is_acceptable=False,
+                unacceptable_reasons=("insufficient_samples_for_duration",),
+            )
 
-        nominal_interval_ms = (
-            1000.0 / nominal_sample_rate_hz
-            if nominal_sample_rate_hz > 0
-            else 20.0
-        )
-        gap_limit_ms = nominal_interval_ms * self.gap_threshold_factor
+        timestamps_ns = [s.timestamp_ns for s in samples]
+        t_start = timestamps_ns[0]
+        t_end = timestamps_ns[-1]
+        duration_s = max(0.0, (t_end - t_start) / 1_000_000_000.0)
 
         intervals_ms: list[float] = []
         non_monotonic_count = 0
+        nominal_interval_ms = (1.0 / nominal_sample_rate_hz) * 1000.0 if nominal_sample_rate_hz > 0 else 20.0
+        gap_limit_ms = nominal_interval_ms * self.gap_threshold_factor
+
         gap_count = 0
         dropped_sample_estimate = 0
 
-        for previous, current in zip(timestamps_ns, timestamps_ns[1:]):
-            dt_ns = current - previous
+        for i in range(1, sample_count):
+            dt_ns = timestamps_ns[i] - timestamps_ns[i - 1]
             dt_ms = dt_ns / 1_000_000.0
 
             if dt_ns <= 0:
@@ -70,72 +86,60 @@ class TimingQualityAuditor:
 
             if dt_ms > gap_limit_ms:
                 gap_count += 1
-                dropped_sample_estimate += max(
-                    0,
-                    int(round(dt_ms / nominal_interval_ms)) - 1,
-                )
+                missing = max(0, int(round(dt_ms / nominal_interval_ms)) - 1)
+                dropped_sample_estimate += missing
 
-        measured_rate_hz = (
-            (len(samples) - 1) / duration_s
-            if duration_s > 0
-            else 0.0
-        )
+        measured_rate_hz = ((sample_count - 1) / duration_s) if duration_s > 0 else 0.0
 
         sorted_intervals = sorted(intervals_ms)
-        mean_interval_ms = sum(intervals_ms) / len(intervals_ms)
-        jitter_std_ms = math.sqrt(
-            sum((x - mean_interval_ms) ** 2 for x in intervals_ms)
-            / len(intervals_ms)
-        )
+        n_intervals = len(sorted_intervals)
 
-        reasons: list[str] = []
+        if n_intervals % 2 == 1:
+            median_interval_ms = sorted_intervals[n_intervals // 2]
+        else:
+            median_interval_ms = (sorted_intervals[n_intervals // 2 - 1] + sorted_intervals[n_intervals // 2]) / 2.0
 
-        if non_monotonic_count:
-            reasons.append(
-                f"non_monotonic_timestamps_detected_{non_monotonic_count}"
-            )
+        p95_idx = int(math.ceil(0.95 * n_intervals)) - 1
+        p95_idx = max(0, min(p95_idx, n_intervals - 1))
+        p95_interval_ms = sorted_intervals[p95_idx]
+
+        max_interval_ms = sorted_intervals[-1]
+
+        mean_interval_ms = sum(intervals_ms) / float(n_intervals)
+        variance = sum((x - mean_interval_ms) ** 2 for x in intervals_ms) / float(n_intervals)
+        jitter_std_ms = math.sqrt(variance)
+
+        unacceptable_reasons: list[str] = []
+
+        if non_monotonic_count > 0:
+            unacceptable_reasons.append(f"non_monotonic_timestamps_detected_{non_monotonic_count}")
 
         if gap_count > self.max_allowed_gaps:
-            reasons.append(
-                f"gap_count_exceeded_{gap_count}_vs_max_{self.max_allowed_gaps}"
-            )
+            unacceptable_reasons.append(f"gap_count_exceeded_{gap_count}_vs_max_{self.max_allowed_gaps}")
 
         if nominal_sample_rate_hz > 0:
-            rate_deviation = (
-                abs(measured_rate_hz - nominal_sample_rate_hz)
-                / nominal_sample_rate_hz
-                * 100.0
-            )
-            if rate_deviation > self.max_rate_deviation_percent:
-                reasons.append(
-                    f"sample_rate_deviation_{rate_deviation:.1f}%"
-                    f"_exceeds_max_{self.max_rate_deviation_percent}%"
+            rate_dev = abs(measured_rate_hz - nominal_sample_rate_hz) / nominal_sample_rate_hz * 100.0
+            if rate_dev > self.max_rate_deviation_percent:
+                unacceptable_reasons.append(
+                    f"sample_rate_deviation_{rate_dev:.1f}%_exceeds_max_{self.max_rate_deviation_percent}%"
                 )
 
-        p95_index = max(
-            0,
-            min(
-                int(math.ceil(0.95 * len(sorted_intervals))) - 1,
-                len(sorted_intervals) - 1,
-            ),
-        )
+        is_acceptable = len(unacceptable_reasons) == 0
 
         return TimingQualityReport(
-            sample_count=len(samples),
+            sample_count=sample_count,
             duration_s=duration_s,
             nominal_sample_rate_hz=nominal_sample_rate_hz,
             measured_mean_sample_rate_hz=measured_rate_hz,
-            median_interval_ms=sorted_intervals[len(sorted_intervals) // 2],
-            p95_interval_ms=sorted_intervals[p95_index],
-            max_interval_ms=sorted_intervals[-1],
+            median_interval_ms=median_interval_ms,
+            p95_interval_ms=p95_interval_ms,
+            max_interval_ms=max_interval_ms,
             jitter_std_ms=jitter_std_ms,
             gap_count=gap_count,
             dropped_sample_estimate=dropped_sample_estimate,
             non_monotonic_timestamp_count=non_monotonic_count,
-            is_acceptable=not reasons,
-            unacceptable_reasons=tuple(reasons),
+            is_acceptable=is_acceptable,
+            unacceptable_reasons=tuple(unacceptable_reasons),
         )
 
-
-# Curated from the private EDITH Intake implementation.
-# Domain types are intentionally not mirrored into this portfolio repository.
+# Exact source excerpt from the private EDITH Intake repository.
