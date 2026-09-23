@@ -1,5 +1,7 @@
 # EDITH Intake — Multimodal Sensing Research
 
+[**English**](README.md) · [Italiano](README.it.md)
+
 **Computer vision · IMU · RGB · depth · temporal inference**
 
 EDITH Intake is an EDITH Dev Studio R&D project exploring passive nutrition capture through event-triggered wearable sensing and multimodal inference.
